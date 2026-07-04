@@ -715,6 +715,12 @@ pub mod relations {
                 }
             }
 
+            impl Clone for $ast {
+                fn clone(&self) -> Self {
+                    Self(SyntaxNode::new_root_mut(self.0.green().into_owned()))
+                }
+            }
+
             impl std::fmt::Display for $ast {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     f.write_str(&self.0.text().to_string())
@@ -1621,6 +1627,30 @@ pub mod relations {
             let relation = Relation::simple("cli");
             rels.replace(1, relation);
             assert_eq!(rels.to_string(), "cli (>= 0.20.21), cli");
+        }
+
+        #[test]
+        fn test_clone_relations() {
+            let rels: Relations = r#"cli (>= 0.20.21), cli (< 0.21)"#.parse().unwrap();
+            let mut cloned = rels.clone();
+
+            assert_eq!(cloned, rels);
+            cloned.push(Relation::simple("glue"));
+
+            assert_eq!(rels.to_string(), "cli (>= 0.20.21), cli (< 0.21)");
+            assert_eq!(cloned.to_string(), "cli (>= 0.20.21), cli (< 0.21), glue");
+        }
+
+        #[test]
+        fn test_clone_relation() {
+            let relation: Relation = "cli (>= 2.5-1)".parse().unwrap();
+            let mut cloned = relation.clone();
+
+            assert_eq!(cloned, relation);
+            cloned.drop_constraint();
+
+            assert_eq!(relation.to_string(), "cli (>= 2.5-1)");
+            assert_eq!(cloned.to_string(), "cli");
         }
 
         #[test]
