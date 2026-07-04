@@ -15,7 +15,7 @@ pub use relations::{Relation, Relations, Version};
 use std::str::FromStr;
 
 /// R DESCRIPTION file
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RDescription(String);
 
 impl std::fmt::Display for RDescription {
@@ -738,9 +738,39 @@ pub mod relations {
         }
     }
 
+    impl Eq for Relations {}
+
+    impl Hash for Relations {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.len().hash(state);
+            for relation in self.relations() {
+                relation.hash(state);
+            }
+        }
+    }
+
+    impl PartialOrd for Relations {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for Relations {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.relations().cmp(other.relations())
+        }
+    }
+
     impl PartialEq for Relation {
         fn eq(&self, other: &Self) -> bool {
             self.name() == other.name() && self.version() == other.version()
+        }
+    }
+
+    impl Hash for Relation {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.name().hash(state);
+            self.version().hash(state);
         }
     }
 
@@ -1654,6 +1684,27 @@ pub mod relations {
         }
 
         #[test]
+        fn test_common_relation_traits() {
+            fn assert_common<T: Clone + Eq + Ord + std::hash::Hash>() {}
+            assert_common::<Relation>();
+            assert_common::<Relations>();
+
+            let rels: Relations = "cli, glue".parse().unwrap();
+            let same_with_different_spacing: Relations = "cli , glue".parse().unwrap();
+            let greater: Relations = "cli, rlang".parse().unwrap();
+
+            let hash = |relations: &Relations| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                relations.hash(&mut hasher);
+                hasher.finish()
+            };
+
+            assert_eq!(rels, same_with_different_spacing);
+            assert_eq!(hash(&rels), hash(&same_with_different_spacing));
+            assert!(rels < greater);
+        }
+
+        #[test]
         fn test_parse_relation() {
             let parsed: Relation = "cli (>= 0.20.21)".parse().unwrap();
             assert_eq!(parsed.to_string(), "cli (>= 0.20.21)");
@@ -1907,5 +1958,19 @@ Enhances: shiny
         fn assert_send_sync<T: Send + Sync>() {}
 
         assert_send_sync::<RDescription>();
+    }
+
+    #[test]
+    fn test_r_description_common_traits() {
+        fn assert_common<T: Clone + Eq + Ord + std::hash::Hash + Send + Sync>() {}
+        assert_common::<RDescription>();
+
+        let desc: RDescription = "Package: mypackage\nVersion: 1.0.0\n".parse().unwrap();
+        let mut cloned = desc.clone();
+        cloned.set_title("Other Package");
+
+        assert_eq!(desc.package().as_deref(), Some("mypackage"));
+        assert_eq!(desc.title(), None);
+        assert_eq!(cloned.title().as_deref(), Some("Other Package"));
     }
 }
