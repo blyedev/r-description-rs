@@ -10,23 +10,43 @@
 //! See https://r-pkgs.org/description.html for more information.
 
 use crate::RCode;
-use deb822_lossless::Paragraph;
+use deb822_lossless::{Deb822, Paragraph, Parse as Deb822Parse};
 pub use relations::{Relation, Relations, Version};
-use std::str::FromStr;
+use rowan::ast::AstNode;
+use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 
 /// R DESCRIPTION file
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RDescription(String);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RDescription(Deb822Parse<Deb822>);
 
 impl std::fmt::Display for RDescription {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.0.tree())
+    }
+}
+
+impl Hash for RDescription {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.to_string().hash(state);
+    }
+}
+
+impl PartialOrd for RDescription {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RDescription {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.to_string().cmp(&other.to_string())
     }
 }
 
 impl Default for RDescription {
     fn default() -> Self {
-        Self(String::new())
+        Self(Deb822::parse(""))
     }
 }
 
@@ -67,29 +87,46 @@ impl std::str::FromStr for RDescription {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Paragraph::from_str(s)?;
-        Ok(Self(s.to_string()))
+        let parse = Deb822::parse(s);
+        parse.clone().to_result()?;
+        Ok(Self(parse))
     }
 }
 
 impl RDescription {
-    fn paragraph(&self) -> Paragraph {
-        Paragraph::from_str(&self.0).expect("RDescription stores valid deb822 paragraph text")
+    fn deb822(&self) -> Deb822 {
+        self.0.tree()
+    }
+
+    fn first_paragraph(&self) -> Option<Paragraph> {
+        self.deb822().paragraphs().next()
     }
 
     fn get(&self, key: &str) -> Option<String> {
-        self.paragraph().get(key)
+        self.first_paragraph()
+            .and_then(|paragraph| paragraph.get(key))
     }
 
     fn insert(&mut self, key: &str, value: &str) {
-        let mut paragraph = self.paragraph();
+        let deb822 = self.deb822();
+        let (mut paragraph, had_paragraph) = if let Some(paragraph) = deb822.paragraphs().next() {
+            (paragraph, true)
+        } else {
+            (Paragraph::new(), false)
+        };
         paragraph.insert(key, value);
-        self.0 = paragraph.to_string();
+        let green = if had_paragraph {
+            deb822.syntax().green().into_owned()
+        } else {
+            let deb822 = vec![paragraph].into_iter().collect::<Deb822>();
+            deb822.syntax().green().into_owned()
+        };
+        self.0 = Deb822Parse::new(green, Vec::new());
     }
 
     /// Create a new empty R DESCRIPTION file
     pub fn new() -> Self {
-        Self(String::new())
+        Self(Deb822::parse(""))
     }
 
     /// Return the package name
@@ -703,27 +740,31 @@ pub mod relations {
         ($ast:ident, $kind:ident) => {
             /// A node in the syntax tree representing a $ast
             #[repr(transparent)]
-            pub struct $ast(SyntaxNode);
+            pub struct $ast(GreenNode);
             impl $ast {
                 #[allow(unused)]
                 fn cast(node: SyntaxNode) -> Option<Self> {
                     if node.kind() == $kind {
-                        Some(Self(node))
+                        Some(Self(node.green().into_owned()))
                     } else {
                         None
                     }
+                }
+
+                fn syntax_node(&self) -> SyntaxNode {
+                    SyntaxNode::new_root_mut(self.0.clone())
                 }
             }
 
             impl Clone for $ast {
                 fn clone(&self) -> Self {
-                    Self(SyntaxNode::new_root_mut(self.0.green().into_owned()))
+                    Self(self.0.clone())
                 }
             }
 
             impl std::fmt::Display for $ast {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    f.write_str(&self.0.text().to_string())
+                    write!(f, "{}", self.0)
                 }
             }
         };
@@ -860,12 +901,16 @@ pub mod relations {
         }
 
         /// Iterate over the entries in this relations field
-        pub fn relations(&self) -> impl Iterator<Item = Relation> + '_ {
-            self.0.children().filter_map(Relation::cast)
+        pub fn relations(&self) -> impl Iterator<Item = Relation> {
+            self.syntax_node()
+                .children()
+                .filter_map(Relation::cast)
+                .collect::<Vec<_>>()
+                .into_iter()
         }
 
         /// Iterate over the entries in this relations field
-        pub fn iter(&self) -> impl Iterator<Item = Relation> + '_ {
+        pub fn iter(&self) -> impl Iterator<Item = Relation> {
             self.relations()
         }
 
@@ -876,59 +921,69 @@ pub mod relations {
 
         /// Remove the relation at the given index
         pub fn remove_relation(&mut self, idx: usize) -> Relation {
-            let mut relation = self.get_relation(idx).unwrap();
-            relation.remove();
+            let node = self.syntax_node();
+            let relation_node = node
+                .children()
+                .filter(|n| n.kind() == RELATION)
+                .nth(idx)
+                .unwrap();
+            let relation = Relation::cast(relation_node.clone()).unwrap();
+            remove_relation_node(&relation_node);
+            self.0 = node.green().into_owned();
             relation
         }
 
         /// Insert a new relation at the given index
         pub fn insert(&mut self, idx: usize, relation: Relation) {
-            let is_empty = !self.0.children_with_tokens().any(|n| n.kind() == COMMA);
-            let (position, new_children) = if let Some(current_relation) = self.relations().nth(idx)
+            let node = self.syntax_node();
+            let is_empty = !node.children_with_tokens().any(|n| n.kind() == COMMA);
+            let (position, new_children) = if let Some(current_relation) =
+                node.children().filter(|n| n.kind() == RELATION).nth(idx)
             {
                 let to_insert: Vec<NodeOrToken<GreenNode, GreenToken>> = if idx == 0 && is_empty {
-                    vec![relation.0.green().into()]
+                    vec![relation.0.into()]
                 } else {
                     vec![
-                        relation.0.green().into(),
+                        relation.0.into(),
                         NodeOrToken::Token(GreenToken::new(COMMA.into(), ",")),
                         NodeOrToken::Token(GreenToken::new(WHITESPACE.into(), " ")),
                     ]
                 };
 
-                (current_relation.0.index(), to_insert)
+                (current_relation.index(), to_insert)
             } else {
-                let child_count = self.0.children_with_tokens().count();
+                let child_count = node.children_with_tokens().count();
                 (
                     child_count,
                     if idx == 0 {
-                        vec![relation.0.green().into()]
+                        vec![relation.0.into()]
                     } else {
                         vec![
                             NodeOrToken::Token(GreenToken::new(COMMA.into(), ",")),
                             NodeOrToken::Token(GreenToken::new(WHITESPACE.into(), " ")),
-                            relation.0.green().into(),
+                            relation.0.into(),
                         ]
                     },
                 )
             };
-            // We can safely replace the root here since Relations is a root node
-            self.0 = SyntaxNode::new_root_mut(
-                self.0.replace_with(
-                    self.0
-                        .green()
-                        .splice_children(position..position, new_children),
-                ),
-            );
+            self.0 = node
+                .green()
+                .splice_children(position..position, new_children);
         }
 
         /// Replace the relation at the given index
         pub fn replace(&mut self, idx: usize, relation: Relation) {
-            let current_relation = self.get_relation(idx).unwrap();
-            self.0.splice_children(
-                current_relation.0.index()..current_relation.0.index() + 1,
-                vec![relation.0.into()],
+            let node = self.syntax_node();
+            let current_relation = node
+                .children()
+                .filter(|n| n.kind() == RELATION)
+                .nth(idx)
+                .unwrap();
+            node.splice_children(
+                current_relation.index()..current_relation.index() + 1,
+                vec![SyntaxNode::new_root_mut(relation.0).into()],
             );
+            self.0 = node.green().into_owned();
         }
 
         /// Push a new relation to the relations field
@@ -971,10 +1026,10 @@ pub mod relations {
                     builder.token(COMMA.into(), ",");
                     builder.token(WHITESPACE.into(), " ");
                 }
-                inject(&mut builder, relation.0);
+                inject(&mut builder, relation.syntax_node());
             }
             builder.finish_node();
-            Relations(SyntaxNode::new_root_mut(builder.finish()))
+            Relations(builder.finish())
         }
     }
 
@@ -1041,6 +1096,52 @@ pub mod relations {
         builder.finish_node();
     }
 
+    fn remove_relation_node(node: &SyntaxNode) {
+        let is_first = !node
+            .siblings(Direction::Prev)
+            .skip(1)
+            .any(|n| n.kind() == RELATION);
+        if !is_first {
+            while let Some(n) = node.prev_sibling_or_token() {
+                if n.kind() == WHITESPACE || n.kind() == NEWLINE {
+                    n.detach();
+                } else if n.kind() == COMMA {
+                    n.detach();
+                    break;
+                } else {
+                    break;
+                }
+            }
+            while let Some(n) = node.prev_sibling_or_token() {
+                if n.kind() == WHITESPACE || n.kind() == NEWLINE {
+                    n.detach();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            while let Some(n) = node.next_sibling_or_token() {
+                if n.kind() == WHITESPACE || n.kind() == NEWLINE {
+                    n.detach();
+                } else if n.kind() == COMMA {
+                    n.detach();
+                    break;
+                } else {
+                    break;
+                }
+            }
+
+            while let Some(n) = node.next_sibling_or_token() {
+                if n.kind() == WHITESPACE || n.kind() == NEWLINE {
+                    n.detach();
+                } else {
+                    break;
+                }
+            }
+        }
+        node.detach();
+    }
+
     impl Relation {
         /// Create a new relation
         ///
@@ -1077,7 +1178,7 @@ pub mod relations {
             }
 
             builder.finish_node();
-            Relation(SyntaxNode::new_root_mut(builder.finish()))
+            Relation(builder.finish())
         }
 
         /// Wrap and sort this relation
@@ -1106,7 +1207,7 @@ pub mod relations {
                 builder.finish_node();
             }
             builder.finish_node();
-            Relation(SyntaxNode::new_root_mut(builder.finish()))
+            Relation(builder.finish())
         }
 
         /// Create a new simple relation, without any version constraints.
@@ -1132,7 +1233,8 @@ pub mod relations {
         /// assert_eq!(relation.to_string(), "vign");
         /// ```
         pub fn drop_constraint(&mut self) -> bool {
-            let version_token = self.0.children().find(|n| n.kind() == VERSION);
+            let node = self.syntax_node();
+            let version_token = node.children().find(|n| n.kind() == VERSION);
             if let Some(version_token) = version_token {
                 // Remove any whitespace before the version token
                 while let Some(prev) = version_token.prev_sibling_or_token() {
@@ -1143,6 +1245,7 @@ pub mod relations {
                     }
                 }
                 version_token.detach();
+                self.0 = node.green().into_owned();
                 return true;
             }
 
@@ -1158,7 +1261,7 @@ pub mod relations {
         /// assert_eq!(relation.name(), "vign");
         /// ```
         pub fn name(&self) -> String {
-            self.0
+            self.syntax_node()
                 .children_with_tokens()
                 .find_map(|it| match it {
                     SyntaxElement::Token(token) if token.kind() == IDENT => Some(token),
@@ -1171,7 +1274,8 @@ pub mod relations {
 
         /// Return the version constraint and the version it is constrained to.
         pub fn version(&self) -> Option<(VersionConstraint, Version)> {
-            let vc = self.0.children().find(|n| n.kind() == VERSION);
+            let node = self.syntax_node();
+            let vc = node.children().find(|n| n.kind() == VERSION);
             let vc = vc.as_ref()?;
             let constraint = vc.children().find(|n| n.kind() == CONSTRAINT);
 
@@ -1199,7 +1303,8 @@ pub mod relations {
         /// assert_eq!(relation.to_string(), "vign (>= 2.0)");
         /// ```
         pub fn set_version(&mut self, version_constraint: Option<(VersionConstraint, Version)>) {
-            let current_version = self.0.children().find(|n| n.kind() == VERSION);
+            let node = self.syntax_node();
+            let current_version = node.children().find(|n| n.kind() == VERSION);
             if let Some((vc, version)) = version_constraint {
                 let mut builder = GreenNodeBuilder::new();
                 builder.start_node(VERSION.into());
@@ -1213,12 +1318,12 @@ pub mod relations {
                 builder.finish_node(); // VERSION
 
                 if let Some(current_version) = current_version {
-                    self.0.splice_children(
+                    node.splice_children(
                         current_version.index()..current_version.index() + 1,
                         vec![SyntaxNode::new_root_mut(builder.finish()).into()],
                     );
                 } else {
-                    let name_node = self.0.children_with_tokens().find(|n| n.kind() == IDENT);
+                    let name_node = node.children_with_tokens().find(|n| n.kind() == IDENT);
                     let idx = if let Some(name_node) = name_node {
                         name_node.index() + 1
                     } else {
@@ -1228,24 +1333,8 @@ pub mod relations {
                         GreenToken::new(WHITESPACE.into(), " ").into(),
                         builder.finish().into(),
                     ];
-                    let new_root = SyntaxNode::new_root_mut(
-                        self.0.green().splice_children(idx..idx, new_children),
-                    );
-                    if let Some(parent) = self.0.parent() {
-                        parent.splice_children(
-                            self.0.index()..self.0.index() + 1,
-                            vec![new_root.into()],
-                        );
-                        self.0 = parent
-                            .children_with_tokens()
-                            .nth(self.0.index())
-                            .unwrap()
-                            .clone()
-                            .into_node()
-                            .unwrap();
-                    } else {
-                        self.0 = new_root;
-                    }
+                    self.0 = node.green().splice_children(idx..idx, new_children);
+                    return;
                 }
             } else if let Some(current_version) = current_version {
                 // Remove any whitespace before the version token
@@ -1258,68 +1347,28 @@ pub mod relations {
                 }
                 current_version.detach();
             }
+            self.0 = node.green().into_owned();
         }
 
         /// Remove this relation
         ///
+        /// Relations are owned snapshots. To remove an entry from a relations field,
+        /// use [`Relations::remove_relation`].
+        ///
         /// # Example
         /// ```
-        /// use r_description::lossless::{Relation, Relations};
+        /// use r_description::lossless::Relations;
         /// let mut relations: Relations = r"cli (>= 0.19.0), blah (< 1.26.0)".parse().unwrap();
-        /// let mut relation = relations.get_relation(0).unwrap();
+        /// let relation = relations.remove_relation(0);
         /// assert_eq!(relation.to_string(), "cli (>= 0.19.0)");
-        /// relation.remove();
         /// assert_eq!(relations.to_string(), "blah (< 1.26.0)");
         /// ```
         pub fn remove(&mut self) {
-            let is_first = !self
-                .0
-                .siblings(Direction::Prev)
-                .skip(1)
-                .any(|n| n.kind() == RELATION);
-            if !is_first {
-                // Not the first item in the list. Remove whitespace backwards to the previous
-                // pipe, the pipe and any whitespace until the previous relation
-                while let Some(n) = self.0.prev_sibling_or_token() {
-                    if n.kind() == WHITESPACE || n.kind() == NEWLINE {
-                        n.detach();
-                    } else if n.kind() == COMMA {
-                        n.detach();
-                        break;
-                    } else {
-                        break;
-                    }
-                }
-                while let Some(n) = self.0.prev_sibling_or_token() {
-                    if n.kind() == WHITESPACE || n.kind() == NEWLINE {
-                        n.detach();
-                    } else {
-                        break;
-                    }
-                }
-            } else {
-                // First item in the list. Remove whitespace up to the pipe, the pipe and anything
-                // before the next relation
-                while let Some(n) = self.0.next_sibling_or_token() {
-                    if n.kind() == WHITESPACE || n.kind() == NEWLINE {
-                        n.detach();
-                    } else if n.kind() == COMMA {
-                        n.detach();
-                        break;
-                    } else {
-                        panic!("Unexpected node: {n:?}");
-                    }
-                }
-
-                while let Some(n) = self.0.next_sibling_or_token() {
-                    if n.kind() == WHITESPACE || n.kind() == NEWLINE {
-                        n.detach();
-                    } else {
-                        break;
-                    }
-                }
+            let node = self.syntax_node();
+            if node.parent().is_some() {
+                remove_relation_node(&node);
+                self.0 = node.green().into_owned();
             }
-            self.0.detach();
         }
 
         /// Check if this relation is satisfied by the given package version.
@@ -1685,7 +1734,7 @@ pub mod relations {
 
         #[test]
         fn test_common_relation_traits() {
-            fn assert_common<T: Clone + Eq + Ord + std::hash::Hash>() {}
+            fn assert_common<T: Clone + Eq + Ord + std::hash::Hash + Send + Sync>() {}
             assert_common::<Relation>();
             assert_common::<Relations>();
 
