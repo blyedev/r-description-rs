@@ -1655,6 +1655,14 @@ pub mod relations {
         }
 
         #[test]
+        fn test_relations_are_send_sync() {
+            fn assert_send_sync<T: Send + Sync>() {}
+
+            assert_send_sync::<Relation>();
+            assert_send_sync::<Relations>();
+        }
+
+        #[test]
         fn test_parse_relation() {
             let parsed: Relation = "cli (>= 0.20.21)".parse().unwrap();
             assert_eq!(parsed.to_string(), "cli (>= 0.20.21)");
