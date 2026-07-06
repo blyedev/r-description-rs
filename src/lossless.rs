@@ -368,6 +368,21 @@ impl RDescription {
     pub fn set_repository(&mut self, repository: &str) {
         self.insert("Repository", repository);
     }
+
+    /// Additional repositories where dependency packages may be found.
+    pub fn additional_repositories(&self) -> Option<Vec<String>> {
+        self.get("Additional_repositories").map(|s| {
+            s.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+    }
+
+    /// Set the additional repositories field.
+    pub fn set_additional_repositories(&mut self, repositories: &[&str]) {
+        self.insert("Additional_repositories", &repositories.join(", "));
+    }
 }
 
 pub mod relations {
@@ -2042,6 +2057,57 @@ Enhances: shiny
         assert_eq!(
             desc.to_string(),
             "Package: mypackage\nTitle: What the Package Does\n\nMaintainer: Example Person\n"
+        );
+    }
+
+    #[test]
+    fn test_r_description_additional_repositories() {
+        let desc: RDescription = r###"Package: mypackage
+Title: What the Package Does
+Version: 1.0.0
+Description: What the package does.
+License: MIT
+Additional_repositories: https://example.com/src/contrib,
+    https://example.org/src/contrib
+"###
+        .parse()
+        .unwrap();
+
+        assert_eq!(
+            desc.additional_repositories(),
+            Some(vec![
+                "https://example.com/src/contrib".to_string(),
+                "https://example.org/src/contrib".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_set_additional_repositories() {
+        let mut desc: RDescription = r###"Package: mypackage
+Title: What the Package Does
+Version: 1.0.0
+Description: What the package does.
+License: MIT
+"###
+        .parse()
+        .unwrap();
+
+        desc.set_additional_repositories(&[
+            "https://example.com/src/contrib",
+            "https://example.org/src/contrib",
+        ]);
+
+        assert_eq!(
+            desc.additional_repositories(),
+            Some(vec![
+                "https://example.com/src/contrib".to_string(),
+                "https://example.org/src/contrib".to_string(),
+            ])
+        );
+        assert_eq!(
+            desc.to_string(),
+            "Package: mypackage\nTitle: What the Package Does\nVersion: 1.0.0\nDescription: What the package does.\nLicense: MIT\nAdditional_repositories: https://example.com/src/contrib, https://example.org/src/contrib\n"
         );
     }
 }
