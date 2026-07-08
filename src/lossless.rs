@@ -124,6 +124,16 @@ impl RDescription {
         self.0 = Deb822Parse::new(green, Vec::new());
     }
 
+    fn remove_field(&mut self, key: &str) {
+        let deb822 = self.deb822();
+        let Some(mut paragraph) = deb822.paragraphs().next() else {
+            return;
+        };
+
+        paragraph.remove(key);
+        self.0 = Deb822Parse::new(deb822.syntax().green().into_owned(), Vec::new());
+    }
+
     /// Create a new empty R DESCRIPTION file
     pub fn new() -> Self {
         Self(Deb822::parse(""))
@@ -381,7 +391,11 @@ impl RDescription {
 
     /// Set the additional repositories field.
     pub fn set_additional_repositories(&mut self, repositories: &[&str]) {
-        self.set_field("Additional_repositories", &repositories.join(", "));
+        if repositories.is_empty() {
+            self.remove_field("Additional_repositories");
+        } else {
+            self.set_field("Additional_repositories", &repositories.join(", "));
+        }
     }
 }
 
@@ -2131,6 +2145,28 @@ License: MIT
         assert_eq!(
             desc.to_string(),
             "Package: mypackage\nTitle: What the Package Does\nVersion: 1.0.0\nDescription: What the package does.\nLicense: MIT\nAdditional_repositories: https://example.com/src/contrib, https://example.org/src/contrib\n"
+        );
+    }
+
+    #[test]
+    fn test_set_empty_additional_repositories_removes_field() {
+        let mut desc: RDescription = r###"Package: mypackage
+Title: What the Package Does
+Version: 1.0.0
+Description: What the package does.
+License: MIT
+Additional_repositories: https://example.com/src/contrib,
+    https://example.org/src/contrib
+"###
+        .parse()
+        .unwrap();
+
+        desc.set_additional_repositories(&[]);
+
+        assert_eq!(desc.additional_repositories(), None);
+        assert_eq!(
+            desc.to_string(),
+            "Package: mypackage\nTitle: What the Package Does\nVersion: 1.0.0\nDescription: What the package does.\nLicense: MIT\n"
         );
     }
 }
