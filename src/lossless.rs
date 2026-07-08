@@ -381,7 +381,7 @@ impl RDescription {
 
     /// Set the additional repositories field.
     pub fn set_additional_repositories(&mut self, repositories: &[&str]) {
-        self.insert("Additional_repositories", &repositories.join(", "));
+        self.set_field("Additional_repositories", &repositories.join(", "));
     }
 }
 
